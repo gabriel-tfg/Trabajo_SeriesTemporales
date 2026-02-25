@@ -1,0 +1,239 @@
+---
+title: "Apartado 4"
+author: "Gabriel Losada Arias"
+date: "2026-01-12"
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+\newpage
+
+# Objetivo del apartado
+
+El objetivo de este apartado es aplicar el método de predicción seleccionado en el apartado 3 para estimar el consumo eléctrico con un horizonte temporal de 4 horas durante el periodo comprendido entre el lunes 8 de junio y el domingo 14 de junio de 2015. Las predicciones se comparan con los valores reales para evaluar el rendimiento del modelo.
+
+# Configuración del experimento
+
+La serie temporal se muestrea cada 10 minutos, por lo que un horizonte de predicción de 4 horas equivale a 24 instantes futuros. En esta práctica se entrena un modelo SARIMA con los datos disponibles hasta el inicio del periodo de estudio (antes del 8 de junio), y posteriormente se generan predicciones para el periodo objetivo. Este enfoque es coherente con la metodología Box–Jenkins descrita en el artículo seleccionado, en la que se ajusta un modelo ARIMA/SARIMA con datos históricos y se utiliza para predicción a corto plazo.
+
+```{r, include=FALSE}
+
+library(tidyverse)
+library(lubridate)
+library(zoo)
+library(forecast)
+library(openxlsx)
+
+```
+
+
+```{r, include=FALSE}
+df <- read.delim(
+  "Demanda_2015.txt",
+  sep = "\t",
+  header = FALSE,
+  stringsAsFactors = FALSE
+)
+
+colnames(df) <- c("Fecha", "Hora", "Demanda")
+
+head(df, 5)
+nrow(df)
+```
+
+```{r, include=FALSE}
+df <- df %>%
+  mutate(
+    datetime = dmy(Fecha) + hm(Hora),
+    y = as.numeric(Demanda)
+  ) %>%
+  arrange(datetime)
+
+```
+
+```{r, include=FALSE}
+stopifnot(nrow(df) == 52560)
+stopifnot(sum(is.na(df$datetime)) == 0)
+stopifnot(sum(is.na(df$y)) == 0)
+
+```
+
+
+```{r}
+start_test <- ymd_hm("2015-06-08 00:00", tz = "UTC")
+end_test   <- ymd_hm("2015-06-14 23:50", tz = "UTC")
+
+df_test <- df %>% filter(datetime >= start_test, datetime <= end_test)
+nrow(df_test)  # deberían ser 7*144 = 1008 observaciones
+```
+
+## Entrenamiento del modelo SARIMA (ajuste único)
+
+A continuación se muestra un fragmento representativo del ajuste del modelo estacional con selección automática de órdenes mediante AIC/AICc.
+
+```{r, echo=TRUE}
+df_train <- df %>% filter(datetime < start_test)
+
+# Convertimos a objeto ts con estacionalidad diaria (144 obs/día)
+y_train <- ts(df_train$y, frequency = 144)
+
+fit <- auto.arima(
+  y_train,
+  seasonal = TRUE,
+  stepwise = TRUE,
+  approximation = TRUE
+)
+
+fit
+```
+
+## Predicción con horizonte de 4 horas (24 pasos)
+
+Para cada instante \(t\) del periodo 8–14 de junio, se obtiene la predicción del valor \(t+4\) horas (24 pasos).  
+Esto permite evaluar explícitamente el rendimiento del modelo a ese horizonte.
+
+```{r, echo=TRUE}
+h <- 24
+idx_test <- which(df$datetime >= start_test & df$datetime <= end_test)
+
+res <- tibble()
+refit_step <- 144
+
+current_end <- max(which(df$datetime < start_test))
+current_fit <- fit
+
+for (i in idx_test) {
+
+  j <- i + h
+  if (j > nrow(df)) break
+
+  if ((i - current_end) >= refit_step) {
+    current_end <- i
+    y_refit <- ts(df$y[1:current_end], frequency = 144)
+    current_fit <- Arima(y_refit, model = fit)
+  }
+
+  fc <- forecast(current_fit, h = h)
+
+  res <- bind_rows(res, tibble(
+    datetime_t = df$datetime[i],
+    datetime_target = df$datetime[j],
+    y_real = df$y[j],
+    y_pred = as.numeric(fc$mean[h])
+  ))
+}
+
+res <- res %>%
+  mutate(
+    error = y_real - y_pred,
+    abs_error = abs(error),
+    sq_error = error^2,
+    ape = abs(error / y_real) * 100
+  )
+```
+
+## Métricas de error
+
+Una vez obtenidas las predicciones para el periodo de estudio, se procede a evaluar cuantitativamente el rendimiento del modelo. Para ello se emplean métricas de error habituales en la literatura de predicción de series temporales energéticas, que permiten analizar tanto la magnitud absoluta del error como su impacto relativo respecto a los valores reales de la demanda.
+
+```{r, include=FALSE}
+MAE <- mean(res$abs_error)
+RMSE <- sqrt(mean(res$sq_error))
+MAPE <- mean(abs(res$error / res$y_real)) * 100
+```
+
+```{r, echo=FALSE}
+metricas_tabla <- tibble(
+  Metrica = c("MAE", "RMSE", "MAPE (%)"),
+  Valor = c(MAE, RMSE, MAPE)
+)
+knitr::kable(metricas_tabla, caption = "Métricas de error del modelo (horizonte 4h).")
+```
+
+Los valores obtenidos indican que el error absoluto medio se sitúa en torno a los 5 300 MW, mientras que el error relativo medio es inferior al 18 %. Estos resultados son coherentes con predicciones a corto plazo de demanda eléctrica realizadas exclusivamente a partir de información histórica, sin el uso de variables exógenas como temperatura, calendario laboral o eventos excepcionales.
+
+## Visualización de resultados
+
+### Predicción vs valor real (horizonte 4h)
+
+En la siguiente figura se comparan los valores reales de la demanda eléctrica con las predicciones obtenidas mediante el modelo SARIMA a un horizonte de 4 horas. Se observa que el modelo es capaz de reproducir adecuadamente la forma general de la serie y seguir el patrón diario de consumo. Las mayores discrepancias aparecen en los periodos de mayor variabilidad, especialmente durante las horas de transición entre periodos de baja y alta demanda, donde la pendiente de la serie es más pronunciada.
+
+```{r, echo=FALSE}
+
+ggplot(res, aes(x = datetime_target)) +
+  geom_line(aes(y = y_real), alpha = 0.7) +
+  geom_line(aes(y = y_pred), linetype = "dashed") +
+  labs(
+    title = "Predicción a 4 horas vista (SARIMA) - Semana 8 a 14 de junio",
+    x = "Tiempo",
+    y = "Demanda"
+  ) +
+  theme_minimal()
+
+```
+
+### Error de predicción
+
+En esta figura se muestra la evolución temporal del error de predicción (valor real menos valor predicho) para el horizonte de 4 horas. El error presenta una estructura temporal clara y no se comporta como ruido blanco, lo que indica que existen patrones de error asociados a determinados momentos del día. En general, los errores se mantienen acotados, aunque se observan picos en periodos de elevada variabilidad de la demanda.
+
+```{r, echo=FALSE}
+ggplot(res, aes(x = datetime_target, y = error)) +
+  geom_line(alpha = 0.7) +
+  labs(
+    title = "Error de predicción (real - predicho) a 4 horas",
+    x = "Tiempo",
+    y = "Error"
+  ) +
+  theme_minimal()
+```
+
+
+
+## Exportar a Excel
+
+Para la ACF necesitamos un `ts`. Como hay estacionalidad diaria, usamos `frequency = 144`.
+
+```{r include=FALSE}
+out_xlsx <- "Resultados_Prediccion_Apartado4.xlsx"
+
+wb <- createWorkbook()
+addWorksheet(wb, "Predicciones")
+
+writeData(wb, "Predicciones", res)
+
+addWorksheet(wb, "Metricas")
+writeData(wb, "Metricas", tibble(MAE = MAE, RMSE = RMSE, MAPE = MAPE))
+
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+out_xlsx
+
+```
+
+## Código y reproducibilidad
+
+El código completo empleado para generar los resultados de este apartado se encuentra disponible en el siguiente repositorio:
+
+https://github.com/gabriel-tfg/Tabajo_Data_Streams
+
+En dicho repositorio se incluye:
+- El fichero RMarkdown completo.
+- El script de implementación.
+- El fichero Excel con las predicciones y métricas.
+- Las instrucciones necesarias para reproducir el experimento.
+
+Esto garantiza la reproducibilidad íntegra del análisis realizado.
+
+## Conclusión del apartado
+
+En este apartado se ha aplicado un modelo SARIMA, seleccionado a partir de un artículo científico de referencia, para la predicción del consumo eléctrico con un horizonte temporal de 4 horas durante la semana comprendida entre el 8 y el 14 de junio de 2015. El modelo ha sido entrenado con datos históricos previos al periodo de estudio y evaluado de forma realista utilizando únicamente información pasada.
+
+Los resultados obtenidos muestran que el modelo es capaz de reproducir adecuadamente la estructura general de la serie y su estacionalidad diaria, proporcionando predicciones razonables a corto plazo. Las métricas de error obtenidas, con un MAPE inferior al 18 %, son consistentes con valores reportados en la literatura para predicciones de demanda eléctrica basadas exclusivamente en modelos temporales.
+
+El análisis gráfico y numérico del error revela que las mayores discrepancias se producen en periodos de elevada variabilidad de la demanda, lo que pone de manifiesto las limitaciones inherentes a los modelos SARIMA cuando no se dispone de información exógena adicional. No obstante, el comportamiento global del modelo es estable y confirma la idoneidad del método seleccionado para la predicción a corto plazo de la demanda eléctrica.
+
+En conjunto, los resultados obtenidos validan la aplicación del modelo SARIMA como una herramienta eficaz y coherente con la metodología descrita en el artículo seleccionado, cumpliendo los objetivos planteados en esta práctica.
