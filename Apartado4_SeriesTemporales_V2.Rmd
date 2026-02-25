@@ -218,13 +218,16 @@ out_xlsx
 
 El código completo empleado para generar los resultados de este apartado se encuentra disponible en el siguiente repositorio:
 
-https://github.com/gabriel-tfg/Tabajo_Data_Streams
+https://github.com/gabriel-tfg/Trabajo_SeriesTemporales
 
 En dicho repositorio se incluye:
-- El fichero RMarkdown completo.
-- El script de implementación.
-- El fichero Excel con las predicciones y métricas.
-- Las instrucciones necesarias para reproducir el experimento.
+
+\begin{itemize}
+  \item El fichero RMarkdown completo.
+  \item El script de implementación.
+  \item El fichero Excel con las predicciones y métricas.
+  \item Las instrucciones necesarias para reproducir el experimento.
+\end{itemize}
 
 Esto garantiza la reproducibilidad íntegra del análisis realizado.
 
